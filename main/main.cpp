@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <inttypes.h>
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -24,6 +25,11 @@
 #define APAGADO 0x00
 #define MENOS   0x40   // solo segmento g
 #define LETRA_E 0x79   // segmentos a, d, e, f, g
+
+// Límites de la calculadora
+#define MAX_CIFRAS_9 100000000   // un número >= a este ya tiene 9 cifras
+#define RESULTADO_MAX 99         // lo más grande que cabe en dos displays
+#define RESULTADO_MIN -9         // "-" en un display y el dígito en el otro
 
 gpio_num_t filas[4] = {GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_27, GPIO_NUM_26};
 gpio_num_t columnas[4] = {GPIO_NUM_25, GPIO_NUM_33, GPIO_NUM_32, GPIO_NUM_23};
@@ -103,6 +109,17 @@ void mostrar_numero(int n)
     }
 }
 
+// Mientras se teclea un número solo se ven sus dos últimas cifras
+void mostrar_entrada(int n)
+{
+    if (n < 10) {
+        patron_izq = APAGADO;
+    } else {
+        patron_izq = digitos[(n / 10) % 10];
+    }
+    patron_der = digitos[n % 10];
+}
+
 void mostrar_error(void)
 {
     patron_izq = LETRA_E;
@@ -136,16 +153,30 @@ const char *nombre(char op)
     return "desconocida";
 }
 
+// Agrega una cifra al número que se está tecleando (máximo 9 cifras).
+// Los displays muestran las dos últimas y la terminal el número completo.
+void agregar_cifra(int &num, char tecla, const char *etiqueta)
+{
+    if (num >= MAX_CIFRAS_9) {
+        printf("Maximo 9 cifras, tecla ignorada\n");
+        return;
+    }
+    num = num * 10 + (tecla - '0');
+    mostrar_entrada(num);
+    printf("%s: %d\n", etiqueta, num);
+}
+
 void calcular(void)
 {
-    int resultado = 0;
+    // En 64 bits: 999999999 x 999999999 no se desborda
+    int64_t resultado = 0;
 
     if (operacion == 'A') {
-        resultado = num1 + num2;
+        resultado = (int64_t)num1 + num2;
     } else if (operacion == 'B') {
-        resultado = num1 - num2;
+        resultado = (int64_t)num1 - num2;
     } else if (operacion == 'C') {
-        resultado = num1 * num2;
+        resultado = (int64_t)num1 * num2;
     } else if (operacion == 'D') {
         if (num2 == 0) {
             mostrar_error();
@@ -155,8 +186,15 @@ void calcular(void)
         resultado = num1 / num2;        // división entera: trunca
     }
 
-    mostrar_numero(resultado);
-    printf("%d %c %d = %d\n", num1, simbolo(operacion), num2, resultado);
+    if (resultado > RESULTADO_MAX || resultado < RESULTADO_MIN) {
+        mostrar_error();
+        printf("%d %c %d = %" PRId64 " -> no cabe en el display\n",
+               num1, simbolo(operacion), num2, resultado);
+        return;
+    }
+
+    mostrar_numero((int)resultado);
+    printf("%d %c %d = %" PRId64 "\n", num1, simbolo(operacion), num2, resultado);
 }
 
 void procesar_tecla(char tecla)
@@ -174,15 +212,14 @@ void procesar_tecla(char tecla)
 
     if (estado == PIDE_NUM1) {
         if (es_digito) {
-            num1 = tecla - '0';
-            mostrar_numero(num1);
+            num1 = 0;
+            agregar_cifra(num1, tecla, "Num1");
             estado = PIDE_OP;
         }
     }
     else if (estado == PIDE_OP) {
-        if (es_digito) {                // corrige el primer número
-            num1 = tecla - '0';
-            mostrar_numero(num1);
+        if (es_digito) {                // sigue tecleando el primer número
+            agregar_cifra(num1, tecla, "Num1");
         } else if (es_operacion) {
             operacion = tecla;
             printf("Operacion: %s (%c)\n", nombre(operacion), simbolo(operacion));
@@ -191,15 +228,14 @@ void procesar_tecla(char tecla)
     }
     else if (estado == PIDE_NUM2) {
         if (es_digito) {
-            num2 = tecla - '0';
-            mostrar_numero(num2);
+            num2 = 0;
+            agregar_cifra(num2, tecla, "Num2");
             estado = PIDE_IGUAL;
         }
     }
     else if (estado == PIDE_IGUAL) {
-        if (es_digito) {                // corrige el segundo número
-            num2 = tecla - '0';
-            mostrar_numero(num2);
+        if (es_digito) {                // sigue tecleando el segundo número
+            agregar_cifra(num2, tecla, "Num2");
         } else if (tecla == '#') {
             calcular();
             estado = RESULTADO;
@@ -207,8 +243,8 @@ void procesar_tecla(char tecla)
     }
     else if (estado == RESULTADO) {
         if (es_digito) {                // empieza una operación nueva
-            num1 = tecla - '0';
-            mostrar_numero(num1);
+            num1 = 0;
+            agregar_cifra(num1, tecla, "Num1");
             estado = PIDE_OP;
         }
     }
